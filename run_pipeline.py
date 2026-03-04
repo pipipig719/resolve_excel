@@ -35,13 +35,17 @@ def normalize_text(value: object) -> str:
     return str(value).strip()
 
 
-def header_set_xlsx(file_path: Path) -> set[str]:
+def load_xlsx_workbook(path: Path) -> openpyxl.Workbook:
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
+        return openpyxl.load_workbook(path, data_only=True)
     except InvalidFileException:
-        # Handle xlsx-content files that use a .xls suffix.
-        with file_path.open("rb") as fh:
-            wb = openpyxl.load_workbook(fh, data_only=True)
+        # Some files are xlsx content with .xls suffix.
+        with path.open("rb") as fh:
+            return openpyxl.load_workbook(fh, data_only=True)
+
+
+def header_set_xlsx(file_path: Path) -> set[str]:
+    wb = load_xlsx_workbook(file_path)
     ws = wb.worksheets[0]
     headers: set[str] = set()
     for col in range(1, ws.max_column + 1):
@@ -63,6 +67,7 @@ def header_set_xls(file_path: Path) -> set[str]:
         if "xlsx file; not supported" in str(exc).lower():
             return header_set_xlsx(file_path)
         raise
+
     ws = wb.sheet_by_index(0)
     headers: set[str] = set()
     for col in range(ws.ncols):
@@ -81,28 +86,52 @@ def header_set(file_path: Path) -> set[str]:
     return set()
 
 
+def looks_like_headerless_inventory(file_path: Path) -> bool:
+    try:
+        wb = load_xlsx_workbook(file_path)
+    except Exception:  # noqa: BLE001
+        return False
+    ws = wb.worksheets[0]
+    # Legacy inventory layout has at least 12 columns with data starting from row 1.
+    return ws.max_column >= 12 and ws.max_row >= 1
+
+
 def detect_inventory(root: Path, explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit.resolve()
 
-    candidates: list[Path] = []
+    header_candidates: list[Path] = []
+    fallback_candidates: list[Path] = []
+
     for file in root.glob("*.xlsx"):
         if file.name.startswith("~$"):
             continue
         if file.name == FINAL_OUTPUT_NAME:
             continue
+
         headers = header_set(file)
         if INVENTORY_HEADERS.issubset(headers):
-            candidates.append(file)
+            header_candidates.append(file)
+            continue
 
-    if not candidates:
-        raise FileNotFoundError("未找到库存文件（需包含：饮片编码、批次、库存、状态）")
+        if looks_like_headerless_inventory(file):
+            fallback_candidates.append(file)
 
-    candidates.sort(
-        key=lambda p: ((CN_NAME_INVENTORY in p.name), p.stat().st_mtime),
-        reverse=True,
-    )
-    return candidates[0].resolve()
+    if header_candidates:
+        header_candidates.sort(
+            key=lambda p: ((CN_NAME_INVENTORY in p.name), p.stat().st_mtime),
+            reverse=True,
+        )
+        return header_candidates[0].resolve()
+
+    if fallback_candidates:
+        fallback_candidates.sort(
+            key=lambda p: ((CN_NAME_INVENTORY in p.name), p.stat().st_mtime),
+            reverse=True,
+        )
+        return fallback_candidates[0].resolve()
+
+    raise FileNotFoundError("未找到库存文件（需包含表头，或旧版无表头库存结构）")
 
 
 def detect_template(root: Path, explicit: Path | None) -> Path:
@@ -118,9 +147,7 @@ def detect_template(root: Path, explicit: Path | None) -> Path:
             candidates.append(file)
 
     if not candidates:
-        raise FileNotFoundError(
-            "未找到模板文件（需包含：饮片编码、是否启用、货位编号、库存、库存下限值）"
-        )
+        raise FileNotFoundError("未找到模板文件（需包含：饮片编码、是否启用、货位编号、库存、库存下限值）")
 
     preferred = [p for p in candidates if CN_NAME_TEMPLATE in p.name]
     if preferred:
@@ -140,6 +167,7 @@ def detect_source_inventory(source_dir: Path, explicit: Path | None) -> Path:
 
     candidates: list[Path] = []
     xls_without_xlrd = False
+
     for file in source_dir.iterdir():
         if not file.is_file():
             continue
@@ -156,6 +184,7 @@ def detect_source_inventory(source_dir: Path, explicit: Path | None) -> Path:
                 xls_without_xlrd = True
                 continue
             raise
+
         if SOURCE_HEADERS.issubset(headers):
             candidates.append(file)
 

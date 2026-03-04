@@ -9,14 +9,27 @@ from pathlib import Path
 
 import openpyxl
 
+CN_CODE = "\u996e\u7247\u7f16\u7801"
+CN_BATCH = "\u6279\u6b21"
+CN_STOCK = "\u5e93\u5b58"
+CN_STATUS = "\u72b6\u6001"
+CN_ENABLED = "\u662f\u5426\u542f\u7528"
+CN_LOCATION = "\u8d27\u4f4d\u7f16\u53f7"
+CN_MIN_STOCK = "\u5e93\u5b58\u4e0b\u9650\u503c"
 
-INVENTORY_REQUIRED_HEADERS = ("饮片编码", "批次", "库存", "状态")
-TEMPLATE_REQUIRED_HEADERS = ("饮片编码", "是否启用", "货位编号", "库存", "库存下限值")
+CN_STATUS_ON = "\u542f\u7528"
+CN_STATUS_OFF = "\u7981\u7528"
+CN_YES = "\u662f"
+CN_NO = "\u5426"
 
-STATUS_ENABLE_SRC = "启用"
-STATUS_DISABLE_SRC = "禁用"
-STATUS_ENABLE_OUT = "是"
-STATUS_DISABLE_OUT = "否"
+INVENTORY_REQUIRED_HEADERS = (CN_CODE, CN_STOCK, CN_STATUS)
+TEMPLATE_REQUIRED_HEADERS = (CN_CODE, CN_ENABLED, CN_LOCATION, CN_STOCK, CN_MIN_STOCK)
+
+# Legacy inventory layout fallback when header row is missing.
+FALLBACK_CODE_COL = 2
+FALLBACK_BATCH_COL = 3
+FALLBACK_STOCK_COL = 11
+FALLBACK_STATUS_COL = 12
 
 
 @dataclass
@@ -37,10 +50,27 @@ class OutputRow:
     min_stock: float | int
 
 
+@dataclass
+class InventoryLayout:
+    start_row: int
+    code_col: int
+    batch_col: int | None
+    stock_col: int
+    status_col: int
+
+
 def normalize_text(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def code_to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return normalize_text(value)
 
 
 def to_number(value: object) -> float:
@@ -48,7 +78,7 @@ def to_number(value: object) -> float:
         return 0.0
     if isinstance(value, (int, float)):
         return float(value)
-    raw = str(value).strip().replace(",", "")
+    raw = normalize_text(value).replace(",", "")
     if raw == "":
         return 0.0
     try:
@@ -76,29 +106,55 @@ def read_header_map(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[str, int
 def ensure_headers(header_map: dict[str, int], required: tuple[str, ...], file_label: str) -> None:
     missing = [h for h in required if h not in header_map]
     if missing:
-        joined = ", ".join(missing)
-        raise ValueError(f"{file_label} 缺少必需列: {joined}")
+        raise ValueError(f"{file_label} 缺少必需列: {', '.join(missing)}")
+
+
+def detect_inventory_layout(ws: openpyxl.worksheet.worksheet.Worksheet) -> InventoryLayout:
+    header_map = read_header_map(ws)
+    has_header = all(k in header_map for k in INVENTORY_REQUIRED_HEADERS)
+
+    if has_header:
+        batch_col = header_map.get(CN_BATCH)
+        return InventoryLayout(
+            start_row=2,
+            code_col=header_map[CN_CODE],
+            batch_col=batch_col,
+            stock_col=header_map[CN_STOCK],
+            status_col=header_map[CN_STATUS],
+        )
+
+    # Headerless fallback: use known legacy column positions.
+    if ws.max_column < FALLBACK_STATUS_COL:
+        raise ValueError(
+            f"库存文件既没有表头，也不符合旧版列位结构（至少需要 {FALLBACK_STATUS_COL} 列）"
+        )
+
+    return InventoryLayout(
+        start_row=1,
+        code_col=FALLBACK_CODE_COL,
+        batch_col=FALLBACK_BATCH_COL if ws.max_column >= FALLBACK_BATCH_COL else None,
+        stock_col=FALLBACK_STOCK_COL,
+        status_col=FALLBACK_STATUS_COL,
+    )
 
 
 def load_inventory_records(inventory_path: Path) -> list[InventoryRecord]:
     wb = openpyxl.load_workbook(inventory_path, data_only=True)
     ws = wb.worksheets[0]
-    header_map = read_header_map(ws)
-    ensure_headers(header_map, INVENTORY_REQUIRED_HEADERS, f"库存文件 {inventory_path}")
-
-    code_col = header_map["饮片编码"]
-    batch_col = header_map["批次"]
-    stock_col = header_map["库存"]
-    status_col = header_map["状态"]
+    layout = detect_inventory_layout(ws)
 
     records: list[InventoryRecord] = []
-    for row in range(2, ws.max_row + 1):
-        code = normalize_text(ws.cell(row=row, column=code_col).value)
-        if code == "":
+    for row in range(layout.start_row, ws.max_row + 1):
+        code = code_to_text(ws.cell(row=row, column=layout.code_col).value)
+        if not code:
             continue
-        batch = normalize_text(ws.cell(row=row, column=batch_col).value)
-        stock = to_number(ws.cell(row=row, column=stock_col).value)
-        status = normalize_text(ws.cell(row=row, column=status_col).value)
+
+        batch = ""
+        if layout.batch_col is not None:
+            batch = normalize_text(ws.cell(row=row, column=layout.batch_col).value)
+
+        stock = to_number(ws.cell(row=row, column=layout.stock_col).value)
+        status = normalize_text(ws.cell(row=row, column=layout.status_col).value)
         records.append(
             InventoryRecord(
                 row_num=row,
@@ -108,15 +164,21 @@ def load_inventory_records(inventory_path: Path) -> list[InventoryRecord]:
                 status=status,
             )
         )
+
+    if not records:
+        raise ValueError("库存文件未读取到有效数据行")
     return records
 
 
 def map_status(status_set: set[str]) -> str:
-    # 同一编码跨批次状态不一致时，优先按“启用”输出。
-    if STATUS_ENABLE_SRC in status_set:
-        return STATUS_ENABLE_OUT
-    if STATUS_DISABLE_SRC in status_set:
-        return STATUS_DISABLE_OUT
+    if CN_STATUS_ON in status_set:
+        return CN_YES
+    if CN_STATUS_OFF in status_set:
+        return CN_NO
+    if CN_YES in status_set:
+        return CN_YES
+    if CN_NO in status_set:
+        return CN_NO
     return ""
 
 
@@ -168,11 +230,11 @@ def write_template(
     if sort_desc:
         rows = sorted(rows, key=lambda x: float(x.stock), reverse=True)
 
-    code_col = header_map["饮片编码"]
-    enabled_col = header_map["是否启用"]
-    location_col = header_map["货位编号"]
-    stock_col = header_map["库存"]
-    min_stock_col = header_map["库存下限值"]
+    code_col = header_map[CN_CODE]
+    enabled_col = header_map[CN_ENABLED]
+    location_col = header_map[CN_LOCATION]
+    stock_col = header_map[CN_STOCK]
+    min_stock_col = header_map[CN_MIN_STOCK]
 
     if ws.max_row >= 2:
         ws.delete_rows(2, ws.max_row - 1)
@@ -271,8 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
+    args = build_parser().parse_args()
 
     inventory_path = Path(args.inventory).expanduser().resolve()
     template_path = Path(args.template).expanduser().resolve()
