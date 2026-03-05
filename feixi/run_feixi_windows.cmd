@@ -1,13 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-cd /d "%~dp0"
-
-if not exist "source\" (
-  echo [ERROR] source directory is missing.
-  echo Create "source" and place the pharmacy-room source workbook there.
-  exit /b 1
-)
+cd /d "%~dp0\\.."
 
 set "UV_EXE="
 where uv >nul 2>nul && set "UV_EXE=uv"
@@ -16,7 +10,7 @@ if not defined UV_EXE if exist "%USERPROFILE%\\.cargo\\bin\\uv.exe" set "UV_EXE=
 
 if not defined UV_EXE (
   echo [ERROR] uv is not installed or not reachable from CMD.
-  echo Install uv first: https://docs.astral.sh/uv/getting-started/installation/
+  echo Install: https://docs.astral.sh/uv/getting-started/installation/
   exit /b 1
 )
 
@@ -26,13 +20,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-call "%UV_EXE%" run python run_pipeline.py %*
+call "%UV_EXE%" run python feixi\\process_feixi.py %*
 if errorlevel 1 (
-  echo [ERROR] pipeline failed.
+  echo [ERROR] feixi processing failed.
   exit /b 1
 )
 
-echo [OK] Pipeline finished.
-echo [OK] Root output: final import workbook generated.
-echo [OK] Source output: backup import workbook generated.
+echo [OK] Feixi files generated.
 exit /b 0

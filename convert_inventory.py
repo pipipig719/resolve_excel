@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils.exceptions import InvalidFileException
 
 CN_CODE = "\u996e\u7247\u7f16\u7801"
 CN_BATCH = "\u6279\u6b21"
@@ -15,6 +16,7 @@ CN_STOCK = "\u5e93\u5b58"
 CN_STATUS = "\u72b6\u6001"
 CN_ENABLED = "\u662f\u5426\u542f\u7528"
 CN_LOCATION = "\u8d27\u4f4d\u7f16\u53f7"
+CN_LOCATION_ALT = "\u8d27\u4f4d\u7f16\u7801"
 CN_MIN_STOCK = "\u5e93\u5b58\u4e0b\u9650\u503c"
 
 CN_STATUS_ON = "\u542f\u7528"
@@ -51,6 +53,12 @@ class OutputRow:
 
 
 @dataclass
+class SourceProfile:
+    location: str | None
+    min_stock: float | None
+
+
+@dataclass
 class InventoryLayout:
     start_row: int
     code_col: int
@@ -59,10 +67,20 @@ class InventoryLayout:
     status_col: int
 
 
+def decode_maybe_gbk(value: object) -> object:
+    if isinstance(value, str):
+        try:
+            return value.encode("latin1").decode("gbk")
+        except Exception:
+            return value
+    return value
+
+
 def normalize_text(value: object) -> str:
     if value is None:
         return ""
-    return str(value).strip()
+    text = decode_maybe_gbk(value)
+    return str(text).strip()
 
 
 def code_to_text(value: object) -> str:
@@ -85,6 +103,16 @@ def to_number(value: object) -> float:
         return float(raw)
     except ValueError:
         return 0.0
+
+
+def to_optional_number(value: object) -> float | None:
+    text = normalize_text(value)
+    if text == "":
+        return None
+    try:
+        return float(text.replace(",", ""))
+    except ValueError:
+        return None
 
 
 def to_excel_number(value: float) -> float | int:
@@ -182,11 +210,122 @@ def map_status(status_set: set[str]) -> str:
     return ""
 
 
+def load_workbook_any_excel(path: Path):
+    try:
+        return openpyxl.load_workbook(path, data_only=True)
+    except InvalidFileException:
+        with path.open("rb") as fh:
+            return openpyxl.load_workbook(fh, data_only=True)
+
+
+def merge_source_profile(
+    profiles: dict[str, SourceProfile],
+    code: str,
+    location: str | None,
+    min_stock: float | None,
+) -> None:
+    existing = profiles.get(code)
+    if existing is None:
+        profiles[code] = SourceProfile(location=location, min_stock=min_stock)
+        return
+
+    if (existing.location is None or existing.location == "") and location:
+        existing.location = location
+    if existing.min_stock is None and min_stock is not None:
+        existing.min_stock = min_stock
+
+
+def load_source_profiles_xlsx(source_path: Path) -> dict[str, SourceProfile]:
+    wb = load_workbook_any_excel(source_path)
+    ws = wb.worksheets[0]
+    header = read_header_map(ws)
+
+    if CN_CODE not in header:
+        raise ValueError(f"源文件缺少列: {CN_CODE}")
+
+    location_col = header.get(CN_LOCATION) or header.get(CN_LOCATION_ALT)
+    min_col = header.get(CN_MIN_STOCK)
+    code_col = header[CN_CODE]
+
+    profiles: dict[str, SourceProfile] = {}
+    for r in range(2, ws.max_row + 1):
+        code = normalize_text(ws.cell(r, code_col).value)
+        if not code:
+            continue
+        location = normalize_text(ws.cell(r, location_col).value) if location_col else ""
+        min_stock = to_optional_number(ws.cell(r, min_col).value) if min_col else None
+        merge_source_profile(
+            profiles,
+            code=code,
+            location=location if location else None,
+            min_stock=min_stock,
+        )
+    return profiles
+
+
+def load_source_profiles_xls(source_path: Path) -> dict[str, SourceProfile]:
+    try:
+        import xlrd
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("读取 .xls 需要 xlrd，请先执行 uv sync 安装依赖。") from exc
+
+    try:
+        wb = xlrd.open_workbook(str(source_path))
+    except Exception as exc:  # noqa: BLE001
+        if "xlsx file; not supported" in str(exc).lower():
+            return load_source_profiles_xlsx(source_path)
+        raise
+
+    ws = wb.sheet_by_index(0)
+    headers = [normalize_text(v) for v in ws.row_values(0)]
+    header_map = {name: idx for idx, name in enumerate(headers) if name}
+
+    if CN_CODE not in header_map:
+        raise ValueError(f"源文件缺少列: {CN_CODE}")
+
+    location_col = header_map.get(CN_LOCATION)
+    if location_col is None:
+        location_col = header_map.get(CN_LOCATION_ALT)
+    min_col = header_map.get(CN_MIN_STOCK)
+    code_col = header_map[CN_CODE]
+
+    profiles: dict[str, SourceProfile] = {}
+    for r in range(1, ws.nrows):
+        row = ws.row_values(r)
+        code = normalize_text(row[code_col] if code_col < len(row) else "")
+        if not code:
+            continue
+        location = normalize_text(row[location_col]) if location_col is not None and location_col < len(row) else ""
+        min_stock = to_optional_number(row[min_col]) if min_col is not None and min_col < len(row) else None
+        merge_source_profile(
+            profiles,
+            code=code,
+            location=location if location else None,
+            min_stock=min_stock,
+        )
+    return profiles
+
+
+def load_source_profiles(source_path: Path | None) -> dict[str, SourceProfile]:
+    if source_path is None:
+        return {}
+    if not source_path.exists():
+        raise FileNotFoundError(f"源文件不存在: {source_path}")
+
+    suffix = source_path.suffix.lower()
+    if suffix == ".xlsx":
+        return load_source_profiles_xlsx(source_path)
+    if suffix == ".xls":
+        return load_source_profiles_xls(source_path)
+    raise ValueError(f"不支持的源文件格式: {source_path.suffix}")
+
+
 def aggregate_records(
     records: list[InventoryRecord],
-    location: str,
-    min_stock: float | int,
-) -> tuple[list[OutputRow], Counter[tuple[str, str]], dict[str, set[str]]]:
+    source_profiles: dict[str, SourceProfile],
+    location_default: str,
+    min_stock_default: float | int,
+) -> tuple[list[OutputRow], Counter[tuple[str, str]], dict[str, set[str]], int]:
     pair_counter: Counter[tuple[str, str]] = Counter((r.code, r.batch) for r in records)
     code_stock: dict[str, float] = defaultdict(float)
     code_status: dict[str, set[str]] = defaultdict(set)
@@ -202,18 +341,28 @@ def aggregate_records(
             code_order.append(r.code)
 
     rows: list[OutputRow] = []
+    matched_source_count = 0
     for code in code_order:
+        profile = source_profiles.get(code)
+        if profile is not None:
+            matched_source_count += 1
+            location = profile.location if profile.location else location_default
+            min_stock = profile.min_stock if profile.min_stock is not None else float(min_stock_default)
+        else:
+            location = location_default
+            min_stock = float(min_stock_default)
+
         rows.append(
             OutputRow(
                 code=code,
                 enabled=map_status(code_status[code]),
                 location=location,
                 stock=to_excel_number(code_stock[code]),
-                min_stock=min_stock,
+                min_stock=to_excel_number(min_stock),
             )
         )
 
-    return rows, pair_counter, code_status
+    return rows, pair_counter, code_status, matched_source_count
 
 
 def write_template(
@@ -300,10 +449,14 @@ def write_reports(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="将药品库存转换为饮片货位导入模板（按饮片编码聚合批次库存）"
+        description="将药品库存转换为饮片货位导入模板（按饮片编码聚合库存）"
     )
     parser.add_argument("--inventory", required=True, help="库存文件路径（xlsx）")
     parser.add_argument("--template", required=True, help="导入模板路径（xlsx）")
+    parser.add_argument(
+        "--source-for-match",
+        help="配方间源数据路径（xls/xlsx），用于匹配最终文件的货位编号和库存下限值",
+    )
     parser.add_argument(
         "--output",
         help="输出文件路径（xlsx）。不传时默认在模板同目录生成 *_generated.xlsx",
@@ -337,6 +490,7 @@ def main() -> int:
 
     inventory_path = Path(args.inventory).expanduser().resolve()
     template_path = Path(args.template).expanduser().resolve()
+    source_match_path = Path(args.source_for_match).expanduser().resolve() if args.source_for_match else None
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
@@ -358,10 +512,12 @@ def main() -> int:
 
     try:
         records = load_inventory_records(inventory_path)
-        rows, pair_counter, code_status = aggregate_records(
+        source_profiles = load_source_profiles(source_match_path)
+        rows, pair_counter, code_status, matched_source_count = aggregate_records(
             records=records,
-            location=args.location,
-            min_stock=min_stock_value,
+            source_profiles=source_profiles,
+            location_default=args.location,
+            min_stock_default=min_stock_value,
         )
         write_template(
             template_path=template_path,
@@ -385,9 +541,12 @@ def main() -> int:
     print("[OK] 转换完成")
     print(f"inventory: {inventory_path}")
     print(f"template:  {template_path}")
+    print(f"source_for_match: {source_match_path if source_match_path else ''}")
     print(f"output:    {output_path}")
     print(f"source_rows: {len(records)}")
     print(f"unique_codes: {len(rows)}")
+    print(f"matched_from_source: {matched_source_count}")
+    print(f"defaulted_not_found: {len(rows)-matched_source_count}")
     print(f"duplicate_code_batch_count: {duplicate_pair_count}")
     print(f"duplicate_code_batch_rows:  {duplicate_pair_rows}")
     print(f"report_summary: {summary_file}")

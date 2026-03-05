@@ -3,12 +3,6 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 
-if not exist "source\" (
-  echo [ERROR] source directory is missing.
-  echo Create "source" and place the pharmacy-room source workbook there.
-  exit /b 1
-)
-
 set "UV_EXE="
 where uv >nul 2>nul && set "UV_EXE=uv"
 if not defined UV_EXE if exist "%LOCALAPPDATA%\\Microsoft\\WinGet\\Packages\\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe\\uv.exe" set "UV_EXE=%LOCALAPPDATA%\\Microsoft\\WinGet\\Packages\\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe\\uv.exe"
@@ -26,13 +20,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-call "%UV_EXE%" run python run_pipeline.py %*
+call "%UV_EXE%" run python gui_launcher.py %*
 if errorlevel 1 (
-  echo [ERROR] pipeline failed.
+  echo [ERROR] GUI launcher failed.
   exit /b 1
 )
 
-echo [OK] Pipeline finished.
-echo [OK] Root output: final import workbook generated.
-echo [OK] Source output: backup import workbook generated.
 exit /b 0

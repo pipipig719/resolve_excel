@@ -2,7 +2,28 @@
 __pycache__/
 *.pyc
 .tmp_reports/
-药品库存.xlsx
-饮片货位导入最终文件.xlsx
-source/配方间饮片数据.xls
-source/饮片货位导入备份文件.xlsx
+
+# Runtime caches
+feixi/__pycache__/
+huaining/__pycache__/
+
+# Root runtime data files
+source/*.xls
+source/*.xlsx
+*导入最终文件.xlsx
+*导入备份文件.xlsx
+*库存.xlsx
+
+# Feixi runtime data files
+feixi/*.xls
+feixi/*.xlsx
+feixi/*.csv
+feixi/feixi_source/*.xls
+feixi/feixi_source/*.xlsx
+
+# Huaining runtime data files
+huaining/*.xls
+huaining/*.xlsx
+huaining/*.csv
+huaining/huaining_source/*.xls
+huaining/huaining_source/*.xlsx

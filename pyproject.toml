@@ -7,11 +7,13 @@ requires-python = ">=3.10"
 dependencies = [
   "openpyxl>=3.1.2",
   "xlrd>=2.0.1",
+  "tkinterdnd2>=0.4.3",
 ]
 
 [project.scripts]
 inventory-template-convert = "convert_inventory:main"
 source-backup-convert = "convert_source_backup:main"
+excel-gui-launcher = "gui_launcher:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -21,5 +23,6 @@ build-backend = "hatchling.build"
 include = [
   "convert_inventory.py",
   "convert_source_backup.py",
+  "gui_launcher.py",
   "run_pipeline.py",
 ]

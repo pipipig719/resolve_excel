@@ -17,8 +17,8 @@ CN_ENABLED = "\u662f\u5426\u542f\u7528"
 CN_LOCATION = "\u8d27\u4f4d\u7f16\u53f7"
 CN_MIN_STOCK = "\u5e93\u5b58\u4e0b\u9650\u503c"
 
-FINAL_OUTPUT_NAME = "\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u6700\u7ec8\u6587\u4ef6.xlsx"
-BACKUP_OUTPUT_NAME = "\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u5907\u4efd\u6587\u4ef6.xlsx"
+FINAL_OUTPUT_NAME = "\u6000\u5b81\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u6700\u7ec8\u6587\u4ef6.xlsx"
+BACKUP_OUTPUT_NAME = "\u6000\u5b81\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u5907\u4efd\u6587\u4ef6.xlsx"
 
 INVENTORY_HEADERS = {CN_CODE, CN_BATCH, CN_STOCK, CN_STATUS}
 TEMPLATE_HEADERS = {CN_CODE, CN_ENABLED, CN_LOCATION, CN_STOCK, CN_MIN_STOCK}
@@ -248,6 +248,8 @@ def main() -> int:
             str(inventory_path),
             "--template",
             str(template_path),
+            "--source-for-match",
+            str(source_path),
             "--output",
             str(final_output),
             "--report-dir",
