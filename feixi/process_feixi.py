@@ -353,14 +353,29 @@ def build_source_profile_map(source_rows: list[dict[str, object]]) -> dict[str, 
         code = normalize_text(r.get(S_CODE, ""))
         if not code:
             continue
-        enabled = map_source_enabled(r.get(S_ENABLED, ""))
+        enabled_raw = normalize_text(r.get(S_ENABLED, ""))
+        enabled = map_source_enabled(enabled_raw)
         location = normalize_text(r.get(S_LOCATION, ""))
         min_val = parse_min_value(r.get(S_MIN, ""))
-        result[code] = {
-            "enabled": enabled,
-            "location": location,
-            "min": min_val,
-        }
+        stock_val = to_stock_amount(r.get(S_STOCK, ""))
+
+        profile = result.get(code)
+        if profile is None:
+            result[code] = {
+                "enabled": enabled,
+                "location": location,
+                "min": min_val,
+                "stock": stock_val,
+            }
+            continue
+
+        profile["stock"] = float(profile.get("stock", 0.0)) + stock_val
+        if location:
+            profile["location"] = location
+        if min_val is not None:
+            profile["min"] = min_val
+        if enabled_raw:
+            profile["enabled"] = enabled
     return result
 
 
@@ -369,7 +384,7 @@ def build_final_rows(
     source_profile_map: dict[str, dict[str, object]],
     default_min: float,
     default_loc: str,
-) -> tuple[list[dict[str, object]], Counter[str], int]:
+) -> tuple[list[dict[str, object]], Counter[str], int, int, int]:
     code_counter = Counter(r.code for r in inv_rows)
     agg_stock: dict[str, float] = defaultdict(float)
     order: list[str] = []
@@ -381,32 +396,66 @@ def build_final_rows(
             seen.add(r.code)
             order.append(r.code)
 
+    for code in source_profile_map.keys():
+        if code not in seen:
+            seen.add(code)
+            order.append(code)
+
     out: list[dict[str, object]] = []
     matched_source_count = 0
+    source_only_forced_disabled_count = 0
+    inv_non_positive_forced_disabled_count = 0
+
     for code in order:
         source_profile = source_profile_map.get(code)
+        has_inventory = code in agg_stock
+        inv_stock = agg_stock.get(code, 0.0)
         if source_profile is not None:
-            enabled = str(source_profile.get("enabled", CN_YES))
             location = normalize_text(source_profile.get("location", "")) or default_loc
             min_from_source = source_profile.get("min")
             min_val = default_min if min_from_source is None else float(min_from_source)
             matched_source_count += 1
         else:
-            enabled = CN_YES
             location = default_loc
             min_val = default_min
+
+        # New Feixi status rules:
+        # 1) Source has code but inventory does not -> disable
+        # 2) Code exists in both, and inventory stock <= 0 -> disable
+        # 3) Otherwise fallback to mapped source status or default yes
+        if source_profile is not None and not has_inventory:
+            enabled = CN_NO
+            source_only_forced_disabled_count += 1
+        elif source_profile is not None and has_inventory and inv_stock <= 0:
+            enabled = CN_NO
+            inv_non_positive_forced_disabled_count += 1
+        elif source_profile is not None:
+            enabled = str(source_profile.get("enabled", CN_YES))
+        else:
+            enabled = CN_YES
+
+        stock_value = inv_stock
+        if not has_inventory and source_profile is not None:
+            stock_value = float(source_profile.get("stock", 0.0))
+
         out.append(
             {
                 T_CODE: code,
                 T_ENABLED: enabled,
                 T_LOCATION: location,
-                T_STOCK: excel_num(agg_stock[code]),
+                T_STOCK: excel_num(stock_value),
                 T_MIN: excel_num(min_val),
             }
         )
 
     out.sort(key=lambda x: float(x[T_STOCK]), reverse=True)
-    return out, code_counter, matched_source_count
+    return (
+        out,
+        code_counter,
+        matched_source_count,
+        source_only_forced_disabled_count,
+        inv_non_positive_forced_disabled_count,
+    )
 
 
 def build_backup_rows(source_rows: list[dict[str, object]], default_min: float, default_loc: str) -> list[dict[str, object]]:
@@ -537,7 +586,13 @@ def main() -> int:
         inv_rows = read_inventory_rows(inventory_file)
         source_rows = load_source_rows(source_file)
         source_profile_map = build_source_profile_map(source_rows)
-        final_rows, code_counter, matched_source_count = build_final_rows(
+        (
+            final_rows,
+            code_counter,
+            matched_source_count,
+            source_only_forced_disabled_count,
+            inv_non_positive_forced_disabled_count,
+        ) = build_final_rows(
             inv_rows,
             source_profile_map=source_profile_map,
             default_min=default_min,
@@ -562,9 +617,12 @@ def main() -> int:
     print(f"source_file={source_file}")
     print(f"template_file={template_file}")
     print(f"inventory_rows={len(inv_rows)}")
-    print(f"unique_codes={len(code_counter)}")
+    print(f"inventory_unique_codes={len(code_counter)}")
+    print(f"output_unique_codes={len(final_rows)}")
     print(f"matched_from_source={matched_source_count}")
-    print(f"defaulted_not_found={len(code_counter)-matched_source_count}")
+    print(f"defaulted_not_found={len(final_rows)-matched_source_count}")
+    print(f"source_only_forced_disabled={source_only_forced_disabled_count}")
+    print(f"inventory_non_positive_forced_disabled={inv_non_positive_forced_disabled_count}")
     print(f"duplicate_code_count={dup_count}")
     print(f"duplicate_rows={dup_rows}")
     print(f"non_g_spec_rows={len(non_g)}")
