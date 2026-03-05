@@ -12,8 +12,29 @@ from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "\u996e\u7247\u5bfc\u5165\u5de5\u5177 GUI"
 
-CN_FINAL_NAME = "\u6000\u5b81\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u6700\u7ec8\u6587\u4ef6.xlsx"
-CN_BACKUP_NAME = "\u6000\u5b81\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u5907\u4efd\u6587\u4ef6.xlsx"
+MODE_HUAINING = "\u6000\u5b81"
+MODE_FEIXI = "\u80a5\u897f"
+
+MODE_CONFIG: dict[str, dict[str, object]] = {
+    MODE_HUAINING: {
+        "key": "huaining",
+        "processor": Path("huaining/process_huaining.py"),
+        "final_name": "\u6000\u5b81\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u6700\u7ec8\u6587\u4ef6.xlsx",
+        "backup_name": "\u6000\u5b81\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u5907\u4efd\u6587\u4ef6.xlsx",
+        "backup_dir_name": "huaining_source",
+        "inventory_exts": {".xlsx"},
+        "supports_report_dir": True,
+    },
+    MODE_FEIXI: {
+        "key": "feixi",
+        "processor": Path("feixi/process_feixi.py"),
+        "final_name": "\u80a5\u897f\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u6700\u7ec8\u6587\u4ef6.xlsx",
+        "backup_name": "\u80a5\u897f\u996e\u7247\u8d27\u4f4d\u5bfc\u5165\u5907\u4efd\u6587\u4ef6.xlsx",
+        "backup_dir_name": "feixi_source",
+        "inventory_exts": {".xls", ".xlsx"},
+        "supports_report_dir": False,
+    },
+}
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -47,11 +68,13 @@ class GuiApp:
 
         self.project_dir = Path(__file__).resolve().parent
 
+        self.mode_var = tk.StringVar(value=MODE_HUAINING)
         self.inventory_var = tk.StringVar()
         self.source_var = tk.StringVar()
         self.template_var = tk.StringVar(value=self._default_template())
-        self.output_dir_var = tk.StringVar(value=str(self.project_dir))
+        self.output_dir_var = tk.StringVar(value=str(self._default_output_dir(MODE_HUAINING)))
         self.status_var = tk.StringVar(value="Ready")
+        self._last_mode_default = str(self._default_output_dir(MODE_HUAINING))
 
         self.run_btn: ttk.Button | None = None
         self.widgets_to_disable: list[tk.Widget] = []
@@ -63,6 +86,11 @@ class GuiApp:
             if "\u6a21\u677f" in f.name:
                 return str(f)
         return ""
+
+    def _default_output_dir(self, mode_name: str) -> Path:
+        cfg = MODE_CONFIG.get(mode_name, MODE_CONFIG[MODE_HUAINING])
+        mode_key = str(cfg["key"])
+        return self.project_dir / mode_key
 
     def _build_layout(self) -> None:
         container = ttk.Frame(self.root, padding=12)
@@ -76,13 +104,16 @@ class GuiApp:
         title.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         row = 1
+        self._add_mode_row(parent=container, row=row)
+        row += 1
+
         self._add_file_row(
             parent=container,
             row=row,
             label="\u5e93\u5b58\u6587\u4ef6",
             var=self.inventory_var,
             browse_callback=self._browse_inventory,
-            file_types=[("Excel", "*.xlsx"), ("All", "*.*")],
+            file_types=[("Excel", "*.xlsx *.xls"), ("All", "*.*")],
         )
         row += 1
 
@@ -167,6 +198,25 @@ class GuiApp:
         self.widgets_to_disable.append(btn)
 
         self._register_dnd(entry, var)
+
+    def _add_mode_row(self, parent: ttk.Frame, row: int) -> None:
+        ttk.Label(parent, text="\u5904\u7406\u6a21\u5f0f").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        mode_select = ttk.Combobox(
+            parent,
+            textvariable=self.mode_var,
+            values=[MODE_HUAINING, MODE_FEIXI],
+            state="readonly",
+        )
+        mode_select.grid(row=row, column=1, sticky="ew", pady=4)
+        mode_select.bind("<<ComboboxSelected>>", self._on_mode_changed)
+        self.widgets_to_disable.append(mode_select)
+
+    def _on_mode_changed(self, _event=None) -> None:
+        current_out = self.output_dir_var.get().strip()
+        new_default = str(self._default_output_dir(self.mode_var.get()))
+        if (not current_out) or (current_out == self._last_mode_default):
+            self.output_dir_var.set(new_default)
+        self._last_mode_default = new_default
 
     def _add_dir_row(
         self,
@@ -265,6 +315,12 @@ class GuiApp:
             messagebox.showerror("Error", f"Failed to open directory: {exc}")
 
     def on_run_clicked(self) -> None:
+        mode_name = self.mode_var.get().strip()
+        mode_cfg = MODE_CONFIG.get(mode_name)
+        if mode_cfg is None:
+            messagebox.showerror("Error", "Invalid mode selected.")
+            return
+
         inventory = Path(self.inventory_var.get().strip()).expanduser()
         source = Path(self.source_var.get().strip()).expanduser()
         template = Path(self.template_var.get().strip()).expanduser()
@@ -280,8 +336,10 @@ class GuiApp:
             messagebox.showerror("Error", "Template file is missing.")
             return
 
-        if inventory.suffix.lower() != ".xlsx":
-            messagebox.showerror("Error", "Inventory file must be .xlsx")
+        inventory_exts = set(mode_cfg["inventory_exts"])
+        if inventory.suffix.lower() not in inventory_exts:
+            readable = ", ".join(sorted(inventory_exts))
+            messagebox.showerror("Error", f"Inventory file extension must be one of: {readable}")
             return
         if source.suffix.lower() not in {".xlsx", ".xls"}:
             messagebox.showerror("Error", "Source file must be .xlsx or .xls")
@@ -291,15 +349,16 @@ class GuiApp:
             return
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        backup_dir = output_dir / "source"
+        backup_dir = output_dir / str(mode_cfg["backup_dir_name"])
         backup_dir.mkdir(parents=True, exist_ok=True)
 
-        final_output = output_dir / CN_FINAL_NAME
-        backup_output = backup_dir / CN_BACKUP_NAME
+        final_output = output_dir / str(mode_cfg["final_name"])
+        backup_output = backup_dir / str(mode_cfg["backup_name"])
 
         self.set_running_state(True)
         self.set_status("Running...")
         self.append_log("=" * 60)
+        self.append_log(f"Mode:      {mode_name}")
         self.append_log(f"Inventory: {inventory}")
         self.append_log(f"Source:    {source}")
         self.append_log(f"Template:  {template}")
@@ -308,7 +367,7 @@ class GuiApp:
 
         worker = threading.Thread(
             target=self._run_pipeline_thread,
-            args=(inventory, source, template, final_output, backup_output),
+            args=(mode_name, inventory, source, template, final_output, backup_output),
             daemon=True,
         )
         worker.start()
@@ -330,45 +389,42 @@ class GuiApp:
 
     def _run_pipeline_thread(
         self,
+        mode_name: str,
         inventory: Path,
         source: Path,
         template: Path,
         final_output: Path,
         backup_output: Path,
     ) -> None:
+        mode_cfg = MODE_CONFIG.get(mode_name)
+        if mode_cfg is None:
+            self.append_log("[ERROR] Invalid mode config")
+            self.set_status("Failed")
+            self.root.after(0, lambda: self.set_running_state(False))
+            return
+
         report_dir = (final_output.parent / ".tmp_reports").resolve()
         try:
-            cmd1 = [
+            processor_script = self.project_dir / Path(str(mode_cfg["processor"]))
+            cmd = [
                 sys.executable,
-                str(self.project_dir / "convert_inventory.py"),
+                str(processor_script),
                 "--inventory",
                 str(inventory),
-                "--template",
-                str(template),
-                "--source-for-match",
-                str(source),
-                "--output",
-                str(final_output),
-                "--report-dir",
-                str(report_dir),
-            ]
-            code1 = self._run_command(cmd1)
-            if code1 != 0:
-                raise RuntimeError(f"convert_inventory failed with exit code {code1}")
-
-            cmd2 = [
-                sys.executable,
-                str(self.project_dir / "convert_source_backup.py"),
                 "--source",
                 str(source),
                 "--template",
                 str(template),
-                "--output",
+                "--output-final",
+                str(final_output),
+                "--output-backup",
                 str(backup_output),
             ]
-            code2 = self._run_command(cmd2)
-            if code2 != 0:
-                raise RuntimeError(f"convert_source_backup failed with exit code {code2}")
+            if bool(mode_cfg.get("supports_report_dir", False)):
+                cmd.extend(["--report-dir", str(report_dir)])
+            code = self._run_command(cmd)
+            if code != 0:
+                raise RuntimeError(f"processor failed with exit code {code}")
 
             if report_dir.exists():
                 shutil.rmtree(report_dir, ignore_errors=True)

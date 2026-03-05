@@ -1,11 +1,33 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 cd /d "%~dp0"
 
-if not exist "source\" (
-  echo [ERROR] source directory is missing.
-  echo Create "source" and place the pharmacy-room source workbook there.
+set "MODE=%~1"
+set "TARGET_SCRIPT="
+set "TARGET_NAME="
+set "FORWARD_ARGS="
+
+if "%MODE%"=="" (
+  set "MODE=huaining"
+  set "TARGET_SCRIPT=huaining\\process_huaining.py"
+  set "TARGET_NAME=Huaining"
+) else if /I "%MODE%"=="huaining" (
+  set "TARGET_SCRIPT=huaining\\process_huaining.py"
+  set "TARGET_NAME=Huaining"
+  set "FORWARD_ARGS=%2 %3 %4 %5 %6 %7 %8 %9"
+) else if /I "%MODE%"=="feixi" (
+  set "TARGET_SCRIPT=feixi\\process_feixi.py"
+  set "TARGET_NAME=Feixi"
+  set "FORWARD_ARGS=%2 %3 %4 %5 %6 %7 %8 %9"
+) else if /I "%MODE:~0,2%"=="--" (
+  set "MODE=huaining"
+  set "TARGET_SCRIPT=huaining\\process_huaining.py"
+  set "TARGET_NAME=Huaining"
+  set "FORWARD_ARGS=%1 %2 %3 %4 %5 %6 %7 %8 %9"
+) else (
+  echo [ERROR] Unknown mode: %MODE%
+  echo Usage: run_windows.cmd [huaining^|feixi] [processor args]
   exit /b 1
 )
 
@@ -26,13 +48,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-call "%UV_EXE%" run python run_pipeline.py %*
+call "%UV_EXE%" run python %TARGET_SCRIPT% !FORWARD_ARGS!
 if errorlevel 1 (
-  echo [ERROR] pipeline failed.
+  echo [ERROR] %TARGET_NAME% processing failed.
   exit /b 1
 )
 
-echo [OK] Pipeline finished.
-echo [OK] Root output: final import workbook generated.
-echo [OK] Source output: backup import workbook generated.
+echo [OK] %TARGET_NAME% pipeline finished.
 exit /b 0
