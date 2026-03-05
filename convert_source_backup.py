@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 import openpyxl
@@ -20,6 +22,7 @@ CN_NO = "\u5426"
 
 SOURCE_REQUIRED_HEADERS = (CN_CODE, CN_STOCK)
 TEMPLATE_REQUIRED_HEADERS = (CN_CODE, CN_ENABLED, CN_LOCATION, CN_STOCK, CN_MIN_STOCK)
+RE_NUMERIC_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
 def normalize_text(value: object) -> str:
@@ -31,29 +34,60 @@ def normalize_text(value: object) -> str:
 def code_to_text(value: object) -> str:
     if value is None:
         return ""
-    if isinstance(value, float) and abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return normalize_text(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _normalize_numeric_string(str(value))
+
+    text = normalize_text(value)
+    if text == "":
+        return ""
+
+    plain = text.replace(",", "")
+    if re.match(r"^[+-]?0\d+$", plain):
+        return text
+    if not RE_NUMERIC_TEXT.match(plain):
+        return text
+    return _normalize_numeric_string(plain)
+
+
+def _parse_decimal(raw: str) -> Decimal | None:
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        return None
+
+
+def _normalize_numeric_string(raw: str) -> str:
+    dec = _parse_decimal(raw)
+    if dec is None:
+        return raw
+    if dec == dec.to_integral_value():
+        return format(dec.quantize(Decimal("1")), "f")
+    normalized = dec.normalize()
+    text = format(normalized, "f")
+    return text.rstrip("0").rstrip(".")
 
 
 def to_number(value: object) -> float | int | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        num = float(value)
-        if abs(num - round(num)) < 1e-9:
-            return int(round(num))
-        return round(num, 6)
+        dec = Decimal(str(value))
+        int_part = dec.to_integral_value()
+        if dec == int_part:
+            return int(int_part)
+        return float(dec.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
     raw = normalize_text(value).replace(",", "")
     if raw == "":
         return None
-    try:
-        num = float(raw)
-        if abs(num - round(num)) < 1e-9:
-            return int(round(num))
-        return round(num, 6)
-    except ValueError:
+    dec = _parse_decimal(raw)
+    if dec is None:
         return value
+    int_part = dec.to_integral_value()
+    if dec == int_part:
+        return int(int_part)
+    return float(dec.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
 
 
 def map_enabled(raw: object) -> str:
@@ -211,11 +245,17 @@ def main() -> int:
             tpl_ws.delete_rows(2, tpl_ws.max_row - 1)
 
         for out_row, row_data in enumerate(rows, start=2):
-            tpl_ws.cell(out_row, code_col, row_data[0])
-            tpl_ws.cell(out_row, enabled_col, row_data[1])
-            tpl_ws.cell(out_row, location_col, row_data[2])
-            tpl_ws.cell(out_row, stock_col, row_data[3])
-            tpl_ws.cell(out_row, min_stock_col, row_data[4])
+            code_cell = tpl_ws.cell(out_row, code_col, row_data[0])
+            enabled_cell = tpl_ws.cell(out_row, enabled_col, row_data[1])
+            location_cell = tpl_ws.cell(out_row, location_col, row_data[2])
+            stock_cell = tpl_ws.cell(out_row, stock_col, row_data[3])
+            min_cell = tpl_ws.cell(out_row, min_stock_col, row_data[4])
+
+            code_cell.number_format = "@"
+            enabled_cell.number_format = "@"
+            location_cell.number_format = "@"
+            stock_cell.number_format = "0.######"
+            min_cell.number_format = "0.######"
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tpl_wb.save(output_path)

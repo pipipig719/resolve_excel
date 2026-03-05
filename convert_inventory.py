@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 import openpyxl
@@ -32,6 +34,7 @@ FALLBACK_CODE_COL = 2
 FALLBACK_BATCH_COL = 3
 FALLBACK_STOCK_COL = 11
 FALLBACK_STATUS_COL = 12
+RE_NUMERIC_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
 @dataclass
@@ -86,9 +89,40 @@ def normalize_text(value: object) -> str:
 def code_to_text(value: object) -> str:
     if value is None:
         return ""
-    if isinstance(value, float) and abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return normalize_text(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _normalize_numeric_string(str(value))
+
+    text = normalize_text(value)
+    if text == "":
+        return ""
+
+    plain = text.replace(",", "")
+    # Preserve user-provided leading-zero pure digit codes.
+    if re.match(r"^[+-]?0\d+$", plain):
+        return text
+    if not RE_NUMERIC_TEXT.match(plain):
+        return text
+    return _normalize_numeric_string(plain)
+
+
+def _parse_decimal(raw: str) -> Decimal | None:
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        return None
+
+
+def _normalize_numeric_string(raw: str) -> str:
+    dec = _parse_decimal(raw)
+    if dec is None:
+        return raw
+    if dec == dec.to_integral_value():
+        return format(dec.quantize(Decimal("1")), "f")
+    normalized = dec.normalize()
+    text = format(normalized, "f")
+    return text.rstrip("0").rstrip(".")
 
 
 def to_number(value: object) -> float:
@@ -99,27 +133,29 @@ def to_number(value: object) -> float:
     raw = normalize_text(value).replace(",", "")
     if raw == "":
         return 0.0
-    try:
-        return float(raw)
-    except ValueError:
+    dec = _parse_decimal(raw)
+    if dec is None:
         return 0.0
+    return float(dec)
 
 
 def to_optional_number(value: object) -> float | None:
     text = normalize_text(value)
     if text == "":
         return None
-    try:
-        return float(text.replace(",", ""))
-    except ValueError:
+    dec = _parse_decimal(text.replace(",", ""))
+    if dec is None:
         return None
+    return float(dec)
 
 
 def to_excel_number(value: float) -> float | int:
-    rounded = round(value)
-    if abs(value - rounded) < 1e-9:
-        return int(rounded)
-    return round(value, 6)
+    dec = Decimal(str(value))
+    rounded_int = dec.to_integral_value()
+    if dec == rounded_int:
+        return int(rounded_int)
+    quantized = dec.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    return float(quantized)
 
 
 def read_header_map(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[str, int]:
@@ -389,11 +425,19 @@ def write_template(
         ws.delete_rows(2, ws.max_row - 1)
 
     for row_idx, row_data in enumerate(rows, start=2):
-        ws.cell(row=row_idx, column=code_col, value=row_data.code)
-        ws.cell(row=row_idx, column=enabled_col, value=row_data.enabled)
-        ws.cell(row=row_idx, column=location_col, value=row_data.location)
-        ws.cell(row=row_idx, column=stock_col, value=row_data.stock)
-        ws.cell(row=row_idx, column=min_stock_col, value=row_data.min_stock)
+        code_cell = ws.cell(row=row_idx, column=code_col, value=row_data.code)
+        enabled_cell = ws.cell(row=row_idx, column=enabled_col, value=row_data.enabled)
+        location_cell = ws.cell(row=row_idx, column=location_col, value=row_data.location)
+        stock_cell = ws.cell(row=row_idx, column=stock_col, value=row_data.stock)
+        min_stock_cell = ws.cell(row=row_idx, column=min_stock_col, value=row_data.min_stock)
+
+        # Keep identifiers/text fields from being displayed in scientific notation.
+        code_cell.number_format = "@"
+        enabled_cell.number_format = "@"
+        location_cell.number_format = "@"
+        # Keep numeric display stable and avoid Excel scientific-format auto-switch.
+        stock_cell.number_format = "0.######"
+        min_stock_cell.number_format = "0.######"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)

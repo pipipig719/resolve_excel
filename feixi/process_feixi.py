@@ -6,6 +6,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 import openpyxl
@@ -36,7 +37,10 @@ CN_NO = "\u5426"
 CN_ENABLE = "\u542f\u7528"
 CN_DISABLE = "\u7981\u7528"
 
-RE_NUMBER_UNIT = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([A-Za-z\u4e00-\u9fff]*)\s*$")
+RE_NUMBER_UNIT = re.compile(
+    r"^\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([A-Za-z\u4e00-\u9fff]*)\s*$"
+)
+RE_NUMERIC_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
 @dataclass
@@ -70,6 +74,43 @@ def normalize_text(value: object) -> str:
     return str(text).strip()
 
 
+def _parse_decimal(raw: str) -> Decimal | None:
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        return None
+
+
+def _normalize_numeric_string(raw: str) -> str:
+    dec = _parse_decimal(raw)
+    if dec is None:
+        return raw
+    if dec == dec.to_integral_value():
+        return format(dec.quantize(Decimal("1")), "f")
+    normalized = dec.normalize()
+    text = format(normalized, "f")
+    return text.rstrip("0").rstrip(".")
+
+
+def code_to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _normalize_numeric_string(str(value))
+
+    text = normalize_text(value)
+    if text == "":
+        return ""
+    plain = text.replace(",", "")
+    if re.match(r"^[+-]?0\d+$", plain):
+        return text
+    if not RE_NUMERIC_TEXT.match(plain):
+        return text
+    return _normalize_numeric_string(plain)
+
+
 def parse_number_with_unit(raw: object) -> tuple[float, str]:
     text = normalize_text(raw)
     if text == "":
@@ -77,7 +118,10 @@ def parse_number_with_unit(raw: object) -> tuple[float, str]:
     m = RE_NUMBER_UNIT.match(text)
     if not m:
         return 0.0, ""
-    num = float(m.group(1))
+    num_dec = _parse_decimal(m.group(1))
+    if num_dec is None:
+        return 0.0, ""
+    num = float(num_dec)
     unit = m.group(2).strip()
     return num, unit
 
@@ -113,10 +157,11 @@ def map_enabled_from_disable(raw: object) -> str:
 
 
 def excel_num(value: float) -> float | int:
-    rounded = round(value)
-    if abs(value - rounded) < 1e-9:
-        return int(rounded)
-    return round(value, 6)
+    dec = Decimal(str(value))
+    int_part = dec.to_integral_value()
+    if dec == int_part:
+        return int(int_part)
+    return float(dec.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
 
 
 def find_first_file(directory: Path, exts: tuple[str, ...], exclude_keywords: tuple[str, ...] = ()) -> Path:
@@ -160,7 +205,7 @@ def _parse_inventory_rows_from_table(headers: list[str], get_row_values, row_cou
     rows: list[InvRow] = []
     for r in range(1, row_count):
         row_values = get_row_values(r)
-        code = normalize_text(row_values[h[CN_CODE]] if h[CN_CODE] < len(row_values) else "")
+        code = code_to_text(row_values[h[CN_CODE]] if h[CN_CODE] < len(row_values) else "")
         if not code:
             continue
         name = normalize_text(row_values[h[CN_NAME]] if CN_NAME in h and h[CN_NAME] < len(row_values) else "")
@@ -250,7 +295,7 @@ def load_source_rows(source_file: Path) -> list[dict[str, object]]:
         if S_CODE not in header:
             raise ValueError(f"Source missing header: {S_CODE}")
         for r in range(2, ws.max_row + 1):
-            code = normalize_text(ws.cell(r, header[S_CODE]).value)
+            code = code_to_text(ws.cell(r, header[S_CODE]).value)
             if not code:
                 continue
             rows.append(
@@ -275,7 +320,7 @@ def load_source_rows(source_file: Path) -> list[dict[str, object]]:
                 raise ValueError(f"Source missing header: {S_CODE}")
             for r in range(1, ws.nrows):
                 rv = ws.row_values(r)
-                code = normalize_text(rv[header[S_CODE]] if header[S_CODE] < len(rv) else "")
+                code = code_to_text(rv[header[S_CODE]] if header[S_CODE] < len(rv) else "")
                 if not code:
                     continue
                 rows.append(
@@ -296,7 +341,7 @@ def load_source_rows(source_file: Path) -> list[dict[str, object]]:
             if S_CODE not in header:
                 raise ValueError(f"Source missing header: {S_CODE}")
             for r in range(2, ws.max_row + 1):
-                code = normalize_text(ws.cell(r, header[S_CODE]).value)
+                code = code_to_text(ws.cell(r, header[S_CODE]).value)
                 if not code:
                     continue
                 rows.append(
@@ -337,11 +382,17 @@ def write_template_rows(template_file: Path, out_file: Path, rows: list[dict[str
         ws.delete_rows(2, ws.max_row - 1)
 
     for i, row in enumerate(rows, start=2):
-        ws.cell(i, h[T_CODE], row[T_CODE])
-        ws.cell(i, h[T_ENABLED], row[T_ENABLED])
-        ws.cell(i, h[T_LOCATION], row[T_LOCATION])
-        ws.cell(i, h[T_STOCK], row[T_STOCK])
-        ws.cell(i, h[T_MIN], row[T_MIN])
+        code_cell = ws.cell(i, h[T_CODE], row[T_CODE])
+        enabled_cell = ws.cell(i, h[T_ENABLED], row[T_ENABLED])
+        location_cell = ws.cell(i, h[T_LOCATION], row[T_LOCATION])
+        stock_cell = ws.cell(i, h[T_STOCK], row[T_STOCK])
+        min_cell = ws.cell(i, h[T_MIN], row[T_MIN])
+
+        code_cell.number_format = "@"
+        enabled_cell.number_format = "@"
+        location_cell.number_format = "@"
+        stock_cell.number_format = "0.######"
+        min_cell.number_format = "0.######"
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_file)
@@ -350,7 +401,7 @@ def write_template_rows(template_file: Path, out_file: Path, rows: list[dict[str
 def build_source_profile_map(source_rows: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     for r in source_rows:
-        code = normalize_text(r.get(S_CODE, ""))
+        code = code_to_text(r.get(S_CODE, ""))
         if not code:
             continue
         enabled_raw = normalize_text(r.get(S_ENABLED, ""))
@@ -461,7 +512,7 @@ def build_final_rows(
 def build_backup_rows(source_rows: list[dict[str, object]], default_min: float, default_loc: str) -> list[dict[str, object]]:
     out: list[dict[str, object]] = []
     for r in source_rows:
-        code = normalize_text(r.get(S_CODE, ""))
+        code = code_to_text(r.get(S_CODE, ""))
         if not code:
             continue
         stock_num = to_stock_amount(r.get(S_STOCK, ""))
@@ -496,7 +547,7 @@ def write_duplicate_csv(path: Path, inv_rows: list[InvRow], code_counter: Counte
 def write_non_g_report(path: Path, inv_rows: list[InvRow], source_rows: list[dict[str, object]]) -> None:
     source_stock: dict[str, str] = {}
     for r in source_rows:
-        code = normalize_text(r.get(S_CODE, ""))
+        code = code_to_text(r.get(S_CODE, ""))
         if not code:
             continue
         source_stock[code] = normalize_text(r.get(S_STOCK, ""))
